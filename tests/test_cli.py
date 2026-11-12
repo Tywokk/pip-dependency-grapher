@@ -20,13 +20,13 @@ REQUESTS_REPOSITORY = {
 class CliTestCase(TempDirTestCase):
     """Общие средства для проверки запуска через main."""
 
-    def run_main(self, ini, source=None):
+    def run_main(self, ini, source=None, *options):
         """Запускает main; source — заглушка получения зависимостей."""
         out, err = io.StringIO(), io.StringIO()
         patch = mock.patch(GET_DEPENDENCIES, side_effect=source)
         with patch as getter, contextlib.redirect_stdout(out):
             with contextlib.redirect_stderr(err):
-                code = main(["--config", str(ini)])
+                code = main(["--config", str(ini), *options])
         return code, out.getvalue(), err.getvalue(), getter
 
     def data_ini(self, name: str, depth: int, package: str = "A") -> Path:
@@ -132,3 +132,66 @@ class TestRepositoryTest(CliTestCase):
         self.assertEqual(code, EXIT_FETCH_ERROR)
         self.assertEqual(out, "")
         self.assertIn("строка 2", err)
+
+
+class ReverseModeTest(CliTestCase):
+    """Режим обратных зависимостей (--reverse) в тестовом режиме."""
+
+    def reverse_lines(self, name: str, package: str, depth: int) -> list[str]:
+        """Запускает main с --reverse и даёт строки вывода без заголовка."""
+        ini = self.data_ini(name, depth, package)
+        code, out, _, _ = self.run_main(ini, None, "--reverse")
+        self.assertEqual(code, EXIT_OK)
+        header, *lines = out.splitlines()
+        self.assertIn(f"Обратные зависимости пакета {package}", header)
+        return lines
+
+    def test_diamond_from_bottom(self) -> None:
+        """Все пакеты, прямо и косвенно зависящие от E."""
+        self.assertEqual(self.reverse_lines("diamond.txt", "E", 5),
+                         ["E: D", "D: B C", "B: A", "C: A", "A:"])
+
+    def test_depth_limit(self) -> None:
+        """Глубина 1: только пакеты, которые зависят от E напрямую."""
+        self.assertEqual(self.reverse_lines("diamond.txt", "E", 1),
+                         ["E: D", "D:"])
+
+    def test_no_dependents(self) -> None:
+        """От пакета A никто не зависит."""
+        self.assertEqual(self.reverse_lines("diamond.txt", "A", 5), ["A:"])
+
+    def test_cycle(self) -> None:
+        """Цикл в обратных зависимостях не зацикливает обход."""
+        self.assertEqual(self.reverse_lines("cycle.txt", "A", 5),
+                         ["A: C", "C: B", "B: A"])
+
+    def test_cycle_from_outside(self) -> None:
+        """Обратные зависимости пакета, на который ведёт цикл."""
+        self.assertEqual(self.reverse_lines("cycle.txt", "D", 5),
+                         ["D: C", "C: B", "B: A", "A: C"])
+
+    def test_self_loop(self) -> None:
+        """Пакет, зависящий от самого себя."""
+        self.assertEqual(self.reverse_lines("self_loop.txt", "B", 5),
+                         ["B: A", "A: A"])
+
+    def test_unknown_package(self) -> None:
+        """Пакета нет в тестовом репозитории."""
+        ini = self.data_ini("diamond.txt", 3, "Z")
+        code, _, err, _ = self.run_main(ini, None, "--reverse")
+        self.assertEqual(code, EXIT_FETCH_ERROR)
+        self.assertIn("не найден", err)
+
+    def test_only_in_test_mode(self) -> None:
+        """В обычном режиме обратные зависимости недоступны."""
+        code, out, err, getter = self.run_main(
+            self.make_ini(), None, "--reverse")
+        self.assertEqual(code, EXIT_CONFIG_ERROR)
+        self.assertEqual(out, "")
+        self.assertIn("только в тестовом режиме", err)
+        getter.assert_not_called()
+
+    def test_forward_mode_has_no_header(self) -> None:
+        """Без --reverse заголовок не выводится."""
+        _, out, _, _ = self.run_main(self.data_ini("diamond.txt", 1))
+        self.assertNotIn("Обратные", out)

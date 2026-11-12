@@ -1,7 +1,7 @@
 """Тесты построения графа зависимостей обходом в ширину."""
 import unittest
 
-from depgraph.graph import build_graph, format_graph
+from depgraph.graph import build_graph, format_graph, reverse_graph
 
 DIAMOND = {"A": ["B", "C"], "B": ["D"], "C": ["D"], "D": []}
 CYCLE = {"A": ["B"], "B": ["C"], "C": ["A"]}
@@ -71,6 +71,33 @@ class BuildGraphTest(unittest.TestCase):
 
         graph = build_graph("0", CHAIN_LENGTH, next_package)
         self.assertEqual(len(graph), CHAIN_LENGTH + 1)
+
+
+class ReverseGraphTest(unittest.TestCase):
+    """Проверка обращения рёбер графа."""
+
+    def test_diamond(self) -> None:
+        """Для каждого пакета перечислены пакеты, которые от него зависят."""
+        self.assertEqual(
+            reverse_graph(DIAMOND),
+            {"A": [], "B": ["A"], "C": ["A"], "D": ["B", "C"]})
+
+    def test_cycle(self) -> None:
+        """Обращение графа с циклом."""
+        self.assertEqual(
+            reverse_graph(CYCLE), {"A": ["C"], "B": ["A"], "C": ["B"]})
+
+    def test_self_dependency(self) -> None:
+        """Пакет, зависящий от себя, зависит от себя и в обращённом графе."""
+        graph = {"A": ["A"]}
+        self.assertEqual(reverse_graph(graph), {"A": ["A"]})
+
+    def test_bfs_over_reversed_graph(self) -> None:
+        """Обход обращённого графа даёт транзитивные обратные зависимости."""
+        reverse = reverse_graph(DIAMOND)
+        graph = build_graph("D", 10, lambda package: reverse[package])
+        self.assertEqual(graph, {"D": ["B", "C"], "B": ["A"], "C": ["A"],
+                                 "A": []})
 
 
 class FormatGraphTest(unittest.TestCase):
