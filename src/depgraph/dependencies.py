@@ -8,10 +8,16 @@ from http import HTTPStatus
 TIMEOUT_SECONDS = 10
 NAME_RE = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 EXTRA_RE = re.compile(r"\bextra\b")
+SEPARATORS_RE = re.compile(r"[-_.]+")
 
 
 class FetchError(Exception):
     """Ошибка получения данных о зависимостях из репозитория."""
+
+
+def normalize_name(name: str) -> str:
+    """Приводит имя пакета к единому виду: строчные буквы, разделитель «-»."""
+    return SEPARATORS_RE.sub("-", name).lower()
 
 
 def build_url(repository: str, package: str) -> str:
@@ -49,7 +55,7 @@ def extract_requirements(metadata: dict) -> list[str]:
 
 
 def parse_requirement(line: str) -> str | None:
-    """Возвращает имя зависимости из строки Requires-Dist.
+    """Возвращает нормализованное имя зависимости из строки Requires-Dist.
 
     Для зависимостей, нужных только для необязательных возможностей
     пакета (в условии указан extra), возвращает None.
@@ -60,7 +66,7 @@ def parse_requirement(line: str) -> str | None:
     match = NAME_RE.match(requirement)
     if match is None:
         return None
-    return match.group(1)
+    return normalize_name(match.group(1))
 
 
 def get_direct_dependencies(repository: str, package: str) -> list[str]:

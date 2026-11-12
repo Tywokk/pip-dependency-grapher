@@ -9,6 +9,7 @@ from depgraph.dependencies import (
     build_url,
     fetch_metadata,
     get_direct_dependencies,
+    normalize_name,
     parse_requirement,
 )
 
@@ -20,6 +21,20 @@ REQUIRES_DIST = [
     "idna<4,>=2.5",
     "colorama; platform_system == 'Windows'",
 ]
+
+
+class NormalizeNameTest(unittest.TestCase):
+    """Приведение имён пакетов к единому виду."""
+
+    def test_case_and_separators(self) -> None:
+        """Регистр и разделители . _ - приводятся к единому виду."""
+        self.assertEqual(normalize_name("Typing_Extensions"),
+                         "typing-extensions")
+        self.assertEqual(normalize_name("zope.interface"), "zope-interface")
+
+    def test_requirement_name_is_normalized(self) -> None:
+        """Имя из строки Requires-Dist нормализуется."""
+        self.assertEqual(parse_requirement("MarkupSafe>=2.0"), "markupsafe")
 
 
 class ParseRequirementTest(unittest.TestCase):
@@ -127,7 +142,7 @@ class GetDirectDependenciesTest(unittest.TestCase):
         """Extra и повторы исключаются, порядок сохраняется."""
         metadata = {"info": {"requires_dist": REQUIRES_DIST}}
         self.assertEqual(self.get(metadata),
-                         ["charset_normalizer", "idna", "colorama"])
+                         ["charset-normalizer", "idna", "colorama"])
 
     def test_no_dependencies(self) -> None:
         """Если requires_dist равен null, зависимостей нет."""
