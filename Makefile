@@ -4,7 +4,7 @@ CONFIG ?= config.ini
 .PHONY: run test clean
 
 run:
-	PYTHONPATH=src $(PYTHON) -m depgraph --config $(CONFIG) $(ARGS)
+	PYTHONPATH=src $(PYTHON) -m depgraph --config $(CONFIG)
 
 test:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests -v

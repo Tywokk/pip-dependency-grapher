@@ -6,10 +6,13 @@ from unittest import mock
 
 from depgraph.cli import EXIT_CONFIG_ERROR, EXIT_FETCH_ERROR, EXIT_OK, main
 from depgraph.dependencies import FetchError
+from depgraph.plantuml import SERVER_URL
 from support import TempDirTestCase
 
 DATA = Path(__file__).parent / "data"
 GET_DEPENDENCIES = "depgraph.cli.get_direct_dependencies"
+OPEN_BROWSER = "depgraph.cli.webbrowser.open"
+IMAGE_PREFIX = "Изображение графа: " + SERVER_URL
 REQUESTS_REPOSITORY = {
     "requests": ["idna", "urllib3"],
     "idna": [],
@@ -20,20 +23,26 @@ REQUESTS_REPOSITORY = {
 class CliTestCase(TempDirTestCase):
     """Общие средства для проверки запуска через main."""
 
-    def run_main(self, ini, source=None, *options):
-        """Запускает main; source — заглушка получения зависимостей."""
-        out, err = io.StringIO(), io.StringIO()
-        patch = mock.patch(GET_DEPENDENCIES, side_effect=source)
-        with patch as getter, contextlib.redirect_stdout(out):
-            with contextlib.redirect_stderr(err):
-                code = main(["--config", str(ini), *options])
-        return code, out.getvalue(), err.getvalue(), getter
+    def run_main(self, ini, source=None):
+        """Запускает main с заглушками сети и браузера.
 
-    def data_ini(self, name: str, depth: int, package: str = "A") -> Path:
+        Возвращает код выхода, stdout и stderr; заглушки доступны как
+        self.getter и self.browser.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch(GET_DEPENDENCIES, side_effect=source) as getter:
+            with mock.patch(OPEN_BROWSER) as browser:
+                with contextlib.redirect_stdout(out):
+                    with contextlib.redirect_stderr(err):
+                        code = main(["--config", str(ini)])
+        self.getter, self.browser = getter, browser
+        return code, out.getvalue(), err.getvalue()
+
+    def data_ini(self, name: str, depth: int, **overrides: str) -> Path:
         """Создаёт INI для тестового репозитория из папки tests/data."""
-        return self.make_ini(package_name=package, test_mode="true",
-                             repository=str(DATA / name),
-                             max_depth=str(depth))
+        params = {"package_name": "A", "test_mode": "true",
+                  "repository": str(DATA / name), "max_depth": str(depth)}
+        return self.make_ini(**{**params, **overrides})
 
 
 class RealRepositoryTest(CliTestCase):
@@ -48,150 +57,100 @@ class RealRepositoryTest(CliTestCase):
         return self.run_main(self.make_ini(**overrides), source)
 
     def test_transitive_graph(self) -> None:
-        """Выводится граф с транзитивными зависимостями."""
-        code, out, _, _ = self.run_requests()
+        """На диаграмме есть транзитивные зависимости."""
+        code, out, _ = self.run_requests()
         self.assertEqual(code, EXIT_OK)
-        self.assertEqual(out.splitlines(),
-                         ["requests: idna urllib3", "idna:", "urllib3: idna"])
+        self.assertIn("[requests] --> [urllib3]", out)
+        self.assertIn("[urllib3] --> [idna]", out)
 
     def test_depth_limit(self) -> None:
         """Глубина 1: зависимости зависимостей не запрашиваются."""
-        _, out, _, getter = self.run_requests(max_depth="1")
-        self.assertEqual(out.splitlines(),
-                         ["requests: idna urllib3", "idna:", "urllib3:"])
-        getter.assert_called_once_with("https://pypi.org/pypi", "requests")
+        _, out, _ = self.run_requests(max_depth="1")
+        self.assertNotIn("[urllib3] --> [idna]", out)
+        self.getter.assert_called_once_with(
+            "https://pypi.org/pypi", "requests")
 
     def test_start_name_is_normalized(self) -> None:
         """Имя начального пакета приводится к нормализованному виду."""
-        _, out, _, _ = self.run_requests(package_name="Requests")
-        self.assertTrue(out.startswith("requests:"))
+        _, out, _ = self.run_requests(package_name="Requests")
+        self.assertIn("[requests]", out)
 
     def test_fetch_error(self) -> None:
         """Ошибка получения данных выводится в stderr."""
-        error = FetchError("пакет не найден")
-        code, out, err, _ = self.run_main(self.make_ini(), error)
+        code, out, err = self.run_main(
+            self.make_ini(), FetchError("пакет не найден"))
         self.assertEqual(code, EXIT_FETCH_ERROR)
         self.assertEqual(out, "")
         self.assertIn("пакет не найден", err)
+        self.browser.assert_not_called()
 
     def test_config_error(self) -> None:
         """Ошибка конфигурации: зависимости не запрашиваются."""
-        code, _, err, getter = self.run_main(self.make_ini(max_depth="0"))
+        code, _, err = self.run_main(self.make_ini(max_depth="0"))
         self.assertEqual(code, EXIT_CONFIG_ERROR)
         self.assertIn("max_depth", err)
-        getter.assert_not_called()
+        self.getter.assert_not_called()
+        self.browser.assert_not_called()
 
 
-class TestRepositoryTest(CliTestCase):
-    """Тестовый режим: граф описан в файле."""
+class VisualizationTest(CliTestCase):
+    """Тестовый режим: вывод PlantUML, ASCII-дерева и изображения."""
 
-    def graph_lines(self, name: str, depth: int) -> list[str]:
+    def lines(self, name: str, depth: int, **overrides: str) -> list[str]:
         """Запускает main на файле из tests/data и даёт строки вывода."""
-        code, out, _, getter = self.run_main(self.data_ini(name, depth))
+        code, out, _ = self.run_main(self.data_ini(name, depth, **overrides))
         self.assertEqual(code, EXIT_OK)
-        getter.assert_not_called()
+        self.getter.assert_not_called()
         return out.splitlines()
 
-    def test_diamond_full(self) -> None:
-        """Общая зависимость выводится один раз."""
-        self.assertEqual(self.graph_lines("diamond.txt", 5),
-                         ["A: B C", "B: D", "C: D", "D: E", "E:"])
+    def test_plantuml_text(self) -> None:
+        """Выводится текст диаграммы PlantUML."""
+        lines = self.lines("diamond.txt", 2)
+        self.assertEqual(lines[:6], ["@startuml", "[A]", "[B]", "[C]", "[D]",
+                                     "[A] --> [B]"])
+        self.assertEqual(lines[9], "@enduml")
 
-    def test_diamond_depth_two(self) -> None:
-        """Глубина 2 обрезает граф."""
-        self.assertEqual(self.graph_lines("diamond.txt", 2),
-                         ["A: B C", "B: D", "C: D", "D:"])
+    def test_image_is_opened(self) -> None:
+        """Адрес изображения выводится и открывается в браузере."""
+        lines = self.lines("diamond.txt", 2)
+        self.assertTrue(lines[-1].startswith(IMAGE_PREFIX))
+        url = lines[-1].removeprefix("Изображение графа: ")
+        self.browser.assert_called_once_with(url)
+
+    def test_no_ascii_tree_by_default(self) -> None:
+        """Без параметра ascii_tree дерево не выводится."""
+        self.assertNotIn("+-- B", self.lines("diamond.txt", 2))
+
+    def test_ascii_tree(self) -> None:
+        """При ascii_tree = true выводится ASCII-дерево."""
+        lines = self.lines("diamond.txt", 2, ascii_tree="true")
+        start = lines.index("@enduml") + 1
+        self.assertEqual(lines[start:start + 5], [
+            "A", "+-- B", "|   `-- D", "`-- C", "    `-- D"])
 
     def test_cycle(self) -> None:
-        """Цикл A -> B -> C -> A обрабатывается корректно."""
-        self.assertEqual(self.graph_lines("cycle.txt", 5),
-                         ["A: B", "B: C", "C: A D", "D:"])
+        """Цикл: ребро возврата на диаграмме и пометка в дереве."""
+        lines = self.lines("cycle.txt", 5, ascii_tree="true")
+        self.assertIn("[C] --> [A]", lines)
+        self.assertIn("        +-- A (цикл)", lines)
 
     def test_self_loop(self) -> None:
         """Пакет, зависящий от самого себя."""
-        self.assertEqual(self.graph_lines("self_loop.txt", 5),
-                         ["A: A B", "B:"])
-
-    def test_start_from_inner_package(self) -> None:
-        """Анализ можно начать с любого пакета из файла."""
-        ini = self.data_ini("diamond.txt", 5, package="C")
-        _, out, _, _ = self.run_main(ini)
-        self.assertEqual(out.splitlines(), ["C: D", "D: E", "E:"])
+        lines = self.lines("self_loop.txt", 5, ascii_tree="true")
+        self.assertIn("[A] --> [A]", lines)
+        self.assertIn("+-- A (цикл)", lines)
 
     def test_unknown_start_package(self) -> None:
         """Начального пакета нет в файле."""
-        code, _, err, _ = self.run_main(
-            self.data_ini("diamond.txt", 3, package="Z"))
+        code, _, err = self.run_main(
+            self.data_ini("diamond.txt", 3, package_name="Z"))
         self.assertEqual(code, EXIT_FETCH_ERROR)
         self.assertIn("не найден", err)
+        self.browser.assert_not_called()
 
     def test_bad_file_format(self) -> None:
         """Файл с ошибкой формата."""
-        code, out, err, _ = self.run_main(
-            self.data_ini("bad_format.txt", 3))
+        code, out, err = self.run_main(self.data_ini("bad_format.txt", 3))
         self.assertEqual(code, EXIT_FETCH_ERROR)
         self.assertEqual(out, "")
         self.assertIn("строка 2", err)
-
-
-class ReverseModeTest(CliTestCase):
-    """Режим обратных зависимостей (--reverse) в тестовом режиме."""
-
-    def reverse_lines(self, name: str, package: str, depth: int) -> list[str]:
-        """Запускает main с --reverse и даёт строки вывода без заголовка."""
-        ini = self.data_ini(name, depth, package)
-        code, out, _, _ = self.run_main(ini, None, "--reverse")
-        self.assertEqual(code, EXIT_OK)
-        header, *lines = out.splitlines()
-        self.assertIn(f"Обратные зависимости пакета {package}", header)
-        return lines
-
-    def test_diamond_from_bottom(self) -> None:
-        """Все пакеты, прямо и косвенно зависящие от E."""
-        self.assertEqual(self.reverse_lines("diamond.txt", "E", 5),
-                         ["E: D", "D: B C", "B: A", "C: A", "A:"])
-
-    def test_depth_limit(self) -> None:
-        """Глубина 1: только пакеты, которые зависят от E напрямую."""
-        self.assertEqual(self.reverse_lines("diamond.txt", "E", 1),
-                         ["E: D", "D:"])
-
-    def test_no_dependents(self) -> None:
-        """От пакета A никто не зависит."""
-        self.assertEqual(self.reverse_lines("diamond.txt", "A", 5), ["A:"])
-
-    def test_cycle(self) -> None:
-        """Цикл в обратных зависимостях не зацикливает обход."""
-        self.assertEqual(self.reverse_lines("cycle.txt", "A", 5),
-                         ["A: C", "C: B", "B: A"])
-
-    def test_cycle_from_outside(self) -> None:
-        """Обратные зависимости пакета, на который ведёт цикл."""
-        self.assertEqual(self.reverse_lines("cycle.txt", "D", 5),
-                         ["D: C", "C: B", "B: A", "A: C"])
-
-    def test_self_loop(self) -> None:
-        """Пакет, зависящий от самого себя."""
-        self.assertEqual(self.reverse_lines("self_loop.txt", "B", 5),
-                         ["B: A", "A: A"])
-
-    def test_unknown_package(self) -> None:
-        """Пакета нет в тестовом репозитории."""
-        ini = self.data_ini("diamond.txt", 3, "Z")
-        code, _, err, _ = self.run_main(ini, None, "--reverse")
-        self.assertEqual(code, EXIT_FETCH_ERROR)
-        self.assertIn("не найден", err)
-
-    def test_only_in_test_mode(self) -> None:
-        """В обычном режиме обратные зависимости недоступны."""
-        code, out, err, getter = self.run_main(
-            self.make_ini(), None, "--reverse")
-        self.assertEqual(code, EXIT_CONFIG_ERROR)
-        self.assertEqual(out, "")
-        self.assertIn("только в тестовом режиме", err)
-        getter.assert_not_called()
-
-    def test_forward_mode_has_no_header(self) -> None:
-        """Без --reverse заголовок не выводится."""
-        _, out, _, _ = self.run_main(self.data_ini("diamond.txt", 1))
-        self.assertNotIn("Обратные", out)

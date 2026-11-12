@@ -28,23 +28,3 @@ def build_graph(
                 visited.add(name)
                 queue.append((name, depth + 1))
     return graph
-
-
-def reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
-    """Разворачивает рёбра графа.
-
-    Для каждого пакета возвращает список пакетов, которые от него зависят.
-    """
-    reverse = {package: [] for package in graph}
-    for package, dependencies in graph.items():
-        for name in dependencies:
-            reverse[name].append(package)
-    return reverse
-
-
-def format_graph(graph: dict[str, list[str]]) -> list[str]:
-    """Превращает граф в строки вида «A: B C» (по одной на пакет)."""
-    return [
-        f"{package}: {' '.join(dependencies)}".rstrip()
-        for package, dependencies in graph.items()
-    ]
