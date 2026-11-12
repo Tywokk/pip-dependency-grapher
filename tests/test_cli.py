@@ -1,52 +1,67 @@
 """Тесты интерфейса командной строки."""
 import contextlib
 import io
+from unittest import mock
 
-from depgraph.cli import EXIT_CONFIG_ERROR, EXIT_OK, main
+from depgraph.cli import EXIT_CONFIG_ERROR, EXIT_FETCH_ERROR, EXIT_OK, main
+from depgraph.dependencies import FetchError
 from support import TempDirTestCase
+
+GET_DEPENDENCIES = "depgraph.cli.get_direct_dependencies"
 
 
 class CliTest(TempDirTestCase):
     """Проверка запуска приложения через main."""
 
-    def run_main(self, *args: str) -> tuple[int, str, str]:
-        """Запускает main и возвращает код выхода, stdout и stderr."""
+    def run_main(self, ini, dependencies=None, error=None):
+        """Запускает main с заглушкой получения зависимостей."""
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main(list(args))
-        return code, out.getvalue(), err.getvalue()
+        patch = mock.patch(GET_DEPENDENCIES, return_value=dependencies,
+                           side_effect=error)
+        with patch as getter, contextlib.redirect_stdout(out):
+            with contextlib.redirect_stderr(err):
+                code = main(["--config", str(ini)])
+        return code, out.getvalue(), err.getvalue(), getter
 
-    def test_prints_all_params(self) -> None:
-        """При запуске выводятся все параметры в формате ключ = значение."""
-        ini = self.make_ini(ascii_tree="true", max_depth="5")
-        code, out, _ = self.run_main("--config", str(ini))
+    def test_prints_dependencies(self) -> None:
+        """Прямые зависимости выводятся списком."""
+        ini = self.make_ini()
+        code, out, _, getter = self.run_main(ini, ["idna", "urllib3"])
         self.assertEqual(code, EXIT_OK)
         self.assertEqual(out.splitlines(), [
-            "package_name = requests",
-            "repository = https://pypi.org/pypi",
-            "test_mode = false",
-            "ascii_tree = true",
-            "max_depth = 5",
+            "Прямые зависимости пакета requests:",
+            "idna",
+            "urllib3",
         ])
+        getter.assert_called_once_with("https://pypi.org/pypi", "requests")
 
-    def test_short_option(self) -> None:
-        """Короткая форма опции -c работает так же, как --config."""
-        code, out, _ = self.run_main("-c", str(self.make_ini()))
+    def test_no_dependencies(self) -> None:
+        """У пакета нет зависимостей."""
+        code, out, _, _ = self.run_main(self.make_ini(), [])
         self.assertEqual(code, EXIT_OK)
-        self.assertIn("package_name = requests", out)
+        self.assertIn("нет прямых зависимостей", out)
 
-    def test_error_goes_to_stderr(self) -> None:
-        """Ошибки печатаются в stderr, код выхода ненулевой."""
-        ini = self.make_ini(max_depth="0", ascii_tree="maybe")
-        code, out, err = self.run_main("--config", str(ini))
-        self.assertEqual(code, EXIT_CONFIG_ERROR)
+    def test_fetch_error(self) -> None:
+        """Ошибка получения данных выводится в stderr."""
+        code, out, err, _ = self.run_main(
+            self.make_ini(), error=FetchError("пакет не найден"))
+        self.assertEqual(code, EXIT_FETCH_ERROR)
         self.assertEqual(out, "")
-        self.assertIn("max_depth", err)
-        self.assertIn("ascii_tree", err)
+        self.assertIn("пакет не найден", err)
 
-    def test_missing_config_file(self) -> None:
-        """Несуществующий файл конфигурации."""
-        missing = self.directory / "none.ini"
-        code, _, err = self.run_main("--config", str(missing))
+    def test_config_error(self) -> None:
+        """Ошибка конфигурации: зависимости не запрашиваются."""
+        code, _, err, getter = self.run_main(self.make_ini(max_depth="0"))
         self.assertEqual(code, EXIT_CONFIG_ERROR)
-        self.assertIn("не найден", err)
+        self.assertIn("max_depth", err)
+        getter.assert_not_called()
+
+    def test_test_mode_not_supported(self) -> None:
+        """Тестовый режим на этом этапе не поддерживается."""
+        graph = self.write("A: B\n", "graph.txt")
+        ini = self.make_ini(
+            package_name="A", repository=str(graph), test_mode="true")
+        code, _, err, getter = self.run_main(ini)
+        self.assertEqual(code, EXIT_CONFIG_ERROR)
+        self.assertIn("не реализована", err)
+        getter.assert_not_called()

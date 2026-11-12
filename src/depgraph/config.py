@@ -32,13 +32,6 @@ class ConfigError(Exception):
         self.problems = problems
 
 
-def format_value(value: object) -> str:
-    """Приводит значение параметра к строке для вывода."""
-    if isinstance(value, bool):
-        return str(value).lower()
-    return str(value)
-
-
 @dataclass(frozen=True)
 class Config:
     """Параметры, настраиваемые пользователем."""
@@ -48,13 +41,6 @@ class Config:
     test_mode: bool
     ascii_tree: bool
     max_depth: int
-
-    def as_pairs(self) -> list[tuple[str, str]]:
-        """Возвращает все параметры в виде пар «ключ, значение»."""
-        return [
-            (name, format_value(getattr(self, name)))
-            for name in PARAM_NAMES
-        ]
 
 
 def read_section(path: Path) -> configparser.SectionProxy:
